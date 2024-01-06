@@ -30,7 +30,7 @@ class DMAQ_qattenLearner:
             self.target_mixer = copy.deepcopy(self.mixer)
 
         self.optimiser = RMSprop(params=self.params, lr=args.lr, alpha=args.optim_alpha, eps=args.optim_eps)
-
+        self.mixer_optimiser = RMSprop(params=self.mixer.parameters(), lr=args.lr, alpha=args.optim_alpha, eps=args.optim_eps)
         # a little wasteful to deepcopy (e.g. duplicates action selector), but should work for any MAC
         self.target_mac = copy.deepcopy(mac)
 
@@ -127,6 +127,12 @@ class DMAQ_qattenLearner:
                                 max_q_i=max_action_qvals, is_v=False)
                 chosen_action_qvals = ans_chosen + ans_adv
 
+            output = self.mixer.forward(ans_adv, batch["state"][:, :-1])
+            gradient = torch.autograd.grad(outputs=output,input = chosen_action_qvals) 
+            gradients.append(torch.max(-gradient,0))
+            gradients = th.stack(gradients, dim=1)  # Concat over time
+
+            
             if self.args.double_q:
                 if self.args.mixer == "dmaq_qatten":
                     target_chosen, _, _, adv_w_final = self.target_mixer(target_chosen_qvals, batch["state"][:, 1:], is_v=True)
@@ -143,6 +149,8 @@ class DMAQ_qattenLearner:
             else:
                 target_max_qvals = self.target_mixer(target_max_qvals, batch["state"][:, 1:], is_v=True)
 
+           
+                      
         # Calculate 1-step Q-Learning targets
         ent = self._calculate_entropy(adv_w_final, policy_outs)
         ent.requires_grad =True
@@ -181,6 +189,13 @@ class DMAQ_qattenLearner:
         grad_norm = th.nn.utils.clip_grad_norm_(params, self.args.grad_norm_clip)
         optimiser.step()
 
+        gradients_reg = (gradients* mask).sum() / mask.sum()
+        # Regularization
+        self.mixer_optimiser.zero_grad()
+        gradients_reg.backward()
+        grad_norm = th.nn.utils.clip_grad_norm_(self.list(self.mixer.parameters()), self.args.grad_norm_clip)
+        self.mixer_optimiser.step()
+                      
         if t_env - self.log_stats_t >= self.args.learner_log_interval:
             self.logger.log_stat("loss", loss.item(), t_env)
             self.logger.log_stat("hit_prob", hit_prob.item(), t_env)
